@@ -44,7 +44,9 @@ export interface WorktreeStore {
 }
 
 export const STORE_FILE = "pi-worktree.json";
-export const STORE_DIR = "pi-worktree";
+export const STORE_DIR = "pid-worktree";
+/** The directory this extension used before it was renamed; still read so live links survive. */
+export const LEGACY_STORE_DIR = "pi-worktree";
 
 export function storePath(commonDir: string): string {
   return `${commonDir.replace(/\/+$/, "")}/${STORE_FILE}`;
@@ -105,10 +107,10 @@ async function readLegacy(commonDir: string): Promise<WorktreeLink[]> {
   }
 }
 
-async function readDir(commonDir: string): Promise<WorktreeLink[]> {
+async function readDir(commonDir: string, dirName = STORE_DIR): Promise<WorktreeLink[]> {
   try {
     const { readdir, readFile } = await import("node:fs/promises");
-    const dir = storeDir(commonDir);
+    const dir = `${commonDir.replace(/\/+$/, "")}/${dirName}`;
     const names = (await readdir(dir)).filter((n) => n.endsWith(".json"));
     const out: WorktreeLink[] = [];
     for (const n of names) {
@@ -135,12 +137,15 @@ async function writeJsonAtomic(dest: string, value: unknown): Promise<void> {
 }
 
 /**
- * Load every link. Per-link files win; a legacy single-file store is merged
- * in and migrated to per-link files (then renamed aside) so it is read once.
+ * Load every link. Per-link files under the current directory win; links left in the directory
+ * this extension used before it was renamed, and a legacy single-file store, are merged in and
+ * migrated so they are read once.
  */
 export async function loadStore(commonDir: string): Promise<WorktreeStore> {
   const files = await readDir(commonDir);
-  const legacy = await readLegacy(commonDir);
+  // Links written before the rename, plus the even older single-file store. Both are merged in and
+  // rewritten under the current name, so a worktree bound by an earlier version stays bound.
+  const legacy = [...(await readDir(commonDir, LEGACY_STORE_DIR)), ...(await readLegacy(commonDir))];
   const seen = new Set(files.map((l) => l.id));
   const fresh = legacy.filter((l) => !seen.has(l.id));
   if (fresh.length > 0) {
