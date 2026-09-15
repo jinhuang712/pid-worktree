@@ -1,8 +1,8 @@
-# pi-worktree
+# pid-worktree
 
 A native [Pi](https://github.com/badlogic/pi-mono) extension for git worktree flow: `/worktree` isolates work into a linked worktree and binds the session to it, `/land` merges it back with linear history.
 
-`pi-worktree` shells out to your own `git` for all repository mutations and keeps one linkage file per worktree inside the shared git dir, so the mapping survives `cd` plus fresh Pi sessions on either side. The agent gets four tools (`worktree_status`, `worktree_create`, `worktree_land`, `worktree_abandon`) and a short per-turn policy: when the workspace is clean and the task is experimental, risky, or parallel, it proactively isolates instead of editing in place.
+`pid-worktree` shells out to your own `git` for all repository mutations and keeps one linkage file per worktree inside the shared git dir, so the mapping survives `cd` plus fresh Pi sessions on either side. The agent gets four tools (`worktree_status`, `worktree_create`, `worktree_land`, `worktree_abandon`) and a short per-turn policy: when the workspace is clean and the task is experimental, risky, or parallel, it proactively isolates instead of editing in place.
 
 ## Mental model
 
@@ -41,13 +41,13 @@ Lifecycle states for a link:
 Install the public GitHub package:
 
 ```bash
-pi install git:github.com/jinhuang712/pi-worktree
+pi install git:github.com/jinhuang712/pid-worktree
 ```
 
 Or install it locally while developing:
 
 ```bash
-pi install -l /absolute/path/to/pi-worktree
+pi install -l /absolute/path/to/pid-worktree
 ```
 
 Restart Pi after installation so it discovers the extension.
@@ -254,7 +254,7 @@ Running `/land` at the origin lands the child this session owns and leaves other
 One file per link, in the shared git dir, so it survives `cd` and fresh sessions on either side:
 
 ```text
-  .git/pi-worktree/
+  .git/pid-worktree/
   |-- <link-id-1>.json     <-- session A owns wt-http-retry
   |-- <link-id-2>.json     <-- session B owns wt-login-fix
   +-- ...
@@ -271,14 +271,14 @@ One file per link, in the shared git dir, so it survives `cd` and fresh sessions
   session A (~/repo)              git common dir              session B (worktree)
   ------------------              --------------              --------------------
 
-  origin @ main                   pi-worktree/                cd ~/repo.worktrees/...
+  origin @ main                   pid-worktree/               cd ~/repo.worktrees/...
   creates wt-http-retry ──save──> <id-A>.json <──load── fresh session finds
                                   <id-B>.json ──save──> creates wt-login-fix
   every load reconciles against `git worktree list`:
   link points at a path git no longer lists → marked `removed`
 ```
 
-- Parallel sessions only write their own file, so no session can clobber another's link. A legacy single `pi-worktree.json` is migrated on first load.
+- Parallel sessions only write their own file, so no session can clobber another's link. Two older layouts are read and merged on first load: a single `pi-worktree.json`, and the per-link directory under the extension's former name, `pi-worktree/`. Writes always use the current directory.
 - Ownership scopes implicit work: a bare land/abandon resolves this session's own link (or the worktree you're standing in) and never auto-grabs another session's link. Naming a link explicitly takes it over deliberately — the result notes the previous owner (`foreign`), and the model says who owned it and what it did. Links created before ownership existed are unowned and landable by anyone.
 
 ```text
@@ -293,7 +293,7 @@ One file per link, in the shared git dir, so it survives `cd` and fresh sessions
 
 The TUI widget shows readiness at a glance: `🌲 wt-fix-login → main · fix login retry · ↑3 · ↓1 · 2 dirty` (commits ahead, origin commits behind, uncommitted files), refreshed after every agent run. Origins show their own plus unowned children.
 
-Transcript contract: every pi-worktree action renders exactly one purple block — a caps `LABEL` plus the hero in `【】`, rows hanging off one dim `├─`/`└─`/`│` diagram tree (`WORKTREE`, `LAND`, `LAND CONFLICT`, `ABANDON`, `ERROR`). Every row is listed — no caps — and file rows (both `WORKTREE` and `LAND`) are a table: status letter, path, `+N`/`-N` (additions green, deletions red, zeros dim), columns padded to the widest cell. Cards render against the real terminal width: long commit subjects wrap onto the next line, hanging under their text instead of being clipped. No absolute paths, no green/red blocks; full output is one expand away. Cards signal state changes with the smallest effective payload — explanations and decisions belong to the model's own words.
+Transcript contract: every pid-worktree action renders exactly one purple block — a caps `LABEL` plus the hero in `【】`, rows hanging off one dim `├─`/`└─`/`│` diagram tree (`WORKTREE`, `LAND`, `LAND CONFLICT`, `ABANDON`, `ERROR`). Every row is listed — no caps — and file rows (both `WORKTREE` and `LAND`) are a table: status letter, path, `+N`/`-N` (additions green, deletions red, zeros dim), columns padded to the widest cell. Cards render against the real terminal width: long commit subjects wrap onto the next line, hanging under their text instead of being clipped. No absolute paths, no green/red blocks; full output is one expand away. Cards signal state changes with the smallest effective payload — explanations and decisions belong to the model's own words.
 
 ## Agent tools
 

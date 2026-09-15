@@ -1,11 +1,17 @@
 # Changelog
 
-All notable changes to `pi-worktree` are documented here.
+All notable changes to `pid-worktree` are documented here.
 
 ## [Unreleased]
 
 ### Changed
 
+- **Renamed to `pid-worktree`.** The package, the repository and the per-repo linkage directory
+  (`<git-common-dir>/pid-worktree/`) all take the new name; the old directory and the older single
+  `pi-worktree.json` are still read and merged on load, so an existing repository keeps its links
+  without a migration step. Two places still carry the old name deliberately and are not worth
+  breaking for cosmetics: the global preferences file (`~/.pi/agent/pi-worktree/config.json`) and
+  the `pi-worktree:<branch>` label on the transient carry stash.
 - **One session, one tree.** A bare land/abandon resolves only the calling session's own link (or the worktree you're standing in) and never auto-grabs another session's worktree — the `Blocked: … belongs to another session` error is replaced by a `no-own-link` note that lists the others and leaves them alone. Naming a link explicitly still takes it over deliberately, flagged `foreign` with the previous owner named, and the model reports it in chat.
 - **No-task `/worktree` never comes back with a question.** With conversation history it infers the pending task and creates the worktree; when nothing is inferable it still creates it and says in one line that it's ready — the old "ask what to work on" escape hatch is gone, because typing `/worktree` means you want the tree. Only with no conversation at all does it create silently and wait for you.
 - **Conflicts are the model's job.** `LAND CONFLICT` still names the files in one purple card, but instead of stopping for hand resolution the model reads each file, keeps the intended result from both sides, `git add`s and finishes — explaining what it kept. It only asks the user when both sides look deliberately contradictory.
