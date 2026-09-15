@@ -26,6 +26,7 @@ import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { rewriteToolInput, type Binding } from "./bind.ts";
 import { diagramTree, fileColumns, type DiagramRow } from "./card.ts";
+import { publishBinding } from "./host-widget.ts";
 import {
   abortMerge,
   aheadBehind,
@@ -297,6 +298,7 @@ export default function (pi: ExtensionAPI) {
       const clear = () => {
         ctx.ui.setWidget(WIDGET_KEY, undefined);
         ctx.ui.setStatus(STATUS_KEY, undefined);
+        publishBinding(ctx, undefined);
       };
       if (!facts) return clear();
       const th = ctx.ui.theme;
@@ -321,6 +323,19 @@ export default function (pi: ExtensionAPI) {
         if (!ab.ahead && !dirty) bits.push(th.fg("dim", "nothing to land yet"));
         const head = th.fg("accent", `🌲 ${link.branch} → ${dest}`);
         const task = link.task ? th.fg("dim", ` · ${truncateMiddle(link.task, 36)}`) : "";
+        publishBinding(ctx, {
+          binding: {
+            branch: link.branch,
+            dest,
+            ahead: ab.ahead,
+            behind: ab.behind,
+            dirty,
+            ...(link.task ? { task: link.task } : {}),
+            worktreePath: link.worktreePath,
+            originPath: link.originPath,
+            inside: inside !== undefined,
+          },
+        });
         ctx.ui.setWidget(WIDGET_KEY, [`${head}${task} · ${bits.join(" · ")}`]);
         ctx.ui.setStatus(STATUS_KEY, th.fg("accent", `🌲 ${link.branch}`) + (ab.ahead ? th.fg("dim", ` ↑${ab.ahead}`) : ""));
         try { ctx.ui.setTitle(`🌲 ${link.branch}`); } catch { /* optional */ }
@@ -332,6 +347,9 @@ export default function (pi: ExtensionAPI) {
       if (visible.length === 0) return clear();
       const shown = visible.slice(0, 3).map((k) => k.branch).join(" · ");
       const more = visible.length > 3 ? ` +${visible.length - 3}` : "";
+      publishBinding(ctx, {
+        children: visible.map((k) => ({ branch: k.branch, worktreePath: k.worktreePath })),
+      });
       ctx.ui.setWidget(WIDGET_KEY, [`${th.fg("accent", `🌲 ${pluralWorktree(visible.length)}`)} ${th.fg("dim", `· ${shown}${more}`)}`]);
       ctx.ui.setStatus(STATUS_KEY, th.fg("accent", `🌲 ${visible.length}`));
     } catch {
@@ -1679,6 +1697,7 @@ export default function (pi: ExtensionAPI) {
     try {
       ctx.ui.setWidget(WIDGET_KEY, undefined);
       ctx.ui.setStatus(STATUS_KEY, undefined);
+      publishBinding(ctx, undefined);
     } catch {
       // Ignore teardown races.
     }
