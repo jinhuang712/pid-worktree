@@ -4,6 +4,13 @@ All notable changes to `pid-worktree` are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A window no longer shows the worktree twice.** The ANSI-painted widget line and the status
+  belong to a terminal; a host that is not one was handed them *and* the `worktree:binding/v1`
+  payload, so PID painted the binding in the session title bar and the stripped string in the
+  strip below it. Non-terminal hosts now get only the payload.
+
 ### Changed
 
 - **Renamed to `pid-worktree`, everywhere, with the migrations to match.** Package, repository,

@@ -296,14 +296,21 @@ export default function (pi: ExtensionAPI) {
    * where they are and whether the worktree is ready to land:
    *   🌲 wt-fix-login → main · ↑3 · ↓1 · 2 dirty
    * Origins with children see their own/unowned children. Chrome never throws.
+   *
+   * The painted line and the status belong to a terminal; a host that is not one gets the same
+   * fields as JSON (`publishBinding`) and paints them itself — handing it the escape-coded string
+   * as well would show the same thing twice, once as bytes it has to strip.
    */
   async function refreshChrome(ctx: ExtensionContext, cwd: string): Promise<void> {
     try {
+      const tui = ctx.mode === "tui";
       const exec = makeExec(pi, ctx.signal ?? undefined)(cwd);
       const facts = await collectFacts(exec, cwd);
       const clear = () => {
-        ctx.ui.setWidget(WIDGET_KEY, undefined);
-        ctx.ui.setStatus(STATUS_KEY, undefined);
+        if (tui) {
+          ctx.ui.setWidget(WIDGET_KEY, undefined);
+          ctx.ui.setStatus(STATUS_KEY, undefined);
+        }
         publishBinding(ctx, undefined);
       };
       if (!facts) return clear();
@@ -342,8 +349,10 @@ export default function (pi: ExtensionAPI) {
             inside: inside !== undefined,
           },
         });
-        ctx.ui.setWidget(WIDGET_KEY, [`${head}${task} · ${bits.join(" · ")}`]);
-        ctx.ui.setStatus(STATUS_KEY, th.fg("accent", `🌲 ${link.branch}`) + (ab.ahead ? th.fg("dim", ` ↑${ab.ahead}`) : ""));
+        if (tui) {
+          ctx.ui.setWidget(WIDGET_KEY, [`${head}${task} · ${bits.join(" · ")}`]);
+          ctx.ui.setStatus(STATUS_KEY, th.fg("accent", `🌲 ${link.branch}`) + (ab.ahead ? th.fg("dim", ` ↑${ab.ahead}`) : ""));
+        }
         try { ctx.ui.setTitle(`🌲 ${link.branch}`); } catch { /* optional */ }
         return;
       }
@@ -356,8 +365,10 @@ export default function (pi: ExtensionAPI) {
       publishBinding(ctx, {
         children: visible.map((k) => ({ branch: k.branch, worktreePath: k.worktreePath })),
       });
-      ctx.ui.setWidget(WIDGET_KEY, [`${th.fg("accent", `🌲 ${pluralWorktree(visible.length)}`)} ${th.fg("dim", `· ${shown}${more}`)}`]);
-      ctx.ui.setStatus(STATUS_KEY, th.fg("accent", `🌲 ${visible.length}`));
+      if (tui) {
+        ctx.ui.setWidget(WIDGET_KEY, [`${th.fg("accent", `🌲 ${pluralWorktree(visible.length)}`)} ${th.fg("dim", `· ${shown}${more}`)}`]);
+        ctx.ui.setStatus(STATUS_KEY, th.fg("accent", `🌲 ${visible.length}`));
+      }
     } catch {
       // Chrome must never break the session.
     }
@@ -1705,8 +1716,10 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async (_event, ctx) => {
     try {
-      ctx.ui.setWidget(WIDGET_KEY, undefined);
-      ctx.ui.setStatus(STATUS_KEY, undefined);
+      if (ctx.mode === "tui") {
+        ctx.ui.setWidget(WIDGET_KEY, undefined);
+        ctx.ui.setStatus(STATUS_KEY, undefined);
+      }
       publishBinding(ctx, undefined);
     } catch {
       // Ignore teardown races.
