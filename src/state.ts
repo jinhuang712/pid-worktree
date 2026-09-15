@@ -1,16 +1,17 @@
 /**
- * pi-worktree linkage store.
+ * pid-worktree linkage store.
  *
  * Session entries alone are not enough: after `/worktree` the user typically
  * `cd`s into the new worktree and starts a fresh pi session with a different
  * cwd/session file. Small JSON files in the shared git dir keep the
  * origin <-> worktree mapping discoverable from either side.
  *
- * Layout: `<git-common-dir>/pi-worktree/<link-id>.json`, one file per link.
+ * Layout: `<git-common-dir>/pid-worktree/<link-id>.json`, one file per link.
  * Parallel sessions only ever write their own link file, so a stale in-memory
  * snapshot in one session can never clobber another session's link — the
  * classic load-modify-save race of a single shared JSON file is gone.
- * The legacy single-file store (`pi-worktree.json`) is migrated on first load.
+ * Two older layouts are read and merged once: the directory under the extension's former name,
+ * and before that a single `pi-worktree.json`.
  */
 
 export interface WorktreeLink {
@@ -43,13 +44,14 @@ export interface WorktreeStore {
   links: WorktreeLink[];
 }
 
-export const STORE_FILE = "pi-worktree.json";
 export const STORE_DIR = "pid-worktree";
 /** The directory this extension used before it was renamed; still read so live links survive. */
 export const LEGACY_STORE_DIR = "pi-worktree";
+/** The single shared file used before per-link files; read once, then renamed aside. */
+export const LEGACY_STORE_FILE = "pi-worktree.json";
 
-export function storePath(commonDir: string): string {
-  return `${commonDir.replace(/\/+$/, "")}/${STORE_FILE}`;
+export function legacyStorePath(commonDir: string): string {
+  return `${commonDir.replace(/\/+$/, "")}/${LEGACY_STORE_FILE}`;
 }
 
 export function storeDir(commonDir: string): string {
@@ -99,7 +101,7 @@ function isLink(l: unknown): l is WorktreeLink {
 async function readLegacy(commonDir: string): Promise<WorktreeLink[]> {
   try {
     const { readFile } = await import("node:fs/promises");
-    const raw = await readFile(storePath(commonDir), "utf8");
+    const raw = await readFile(legacyStorePath(commonDir), "utf8");
     const parsed = JSON.parse(raw) as Partial<WorktreeStore>;
     return Array.isArray(parsed?.links) ? parsed.links.filter(isLink) : [];
   } catch {
@@ -152,7 +154,7 @@ export async function loadStore(commonDir: string): Promise<WorktreeStore> {
     try {
       for (const l of fresh) await writeJsonAtomic(linkPath(commonDir, l.id), l);
       const { rename } = await import("node:fs/promises");
-      await rename(storePath(commonDir), `${storePath(commonDir)}.migrated`);
+      await rename(legacyStorePath(commonDir), `${legacyStorePath(commonDir)}.migrated`);
     } catch {
       // Migration is best-effort; the legacy file stays readable.
     }
@@ -245,24 +247,57 @@ export interface GlobalPrefs {
 
 export const STRATEGIES = ["rebase", "merge", "squash"] as const;
 
-export function prefsPath(homeDir?: string): string {
+function agentDir(homeDir?: string): string {
   const home = homeDir ?? process.env.HOME ?? process.env.USERPROFILE ?? "~";
-  return `${normalizePath(home)}/.pi/agent/pi-worktree/config.json`;
+  return `${normalizePath(home)}/.pi/agent`;
+}
+
+export function prefsPath(homeDir?: string): string {
+  return `${agentDir(homeDir)}/${STORE_DIR}/config.json`;
+}
+
+/** Where preferences lived before the rename. Read once, then written forward. */
+export function legacyPrefsPath(homeDir?: string): string {
+  return `${agentDir(homeDir)}/${LEGACY_STORE_DIR}/config.json`;
 }
 
 export function validStrategy(s: unknown): s is (typeof STRATEGIES)[number] {
   return typeof s === "string" && (STRATEGIES as readonly string[]).includes(s);
 }
 
-export async function loadPrefs(homeDir?: string): Promise<GlobalPrefs> {
+function readPrefsFile(text: string): GlobalPrefs | undefined {
   try {
-    const { readFile } = await import("node:fs/promises");
-    const parsed = JSON.parse(await readFile(prefsPath(homeDir), "utf8")) as GlobalPrefs;
+    const parsed = JSON.parse(text) as GlobalPrefs;
     if (parsed && typeof parsed === "object" && (parsed.defaultStrategy === undefined || validStrategy(parsed.defaultStrategy))) {
       return parsed.defaultStrategy === undefined ? {} : { defaultStrategy: parsed.defaultStrategy };
     }
   } catch {
-    // Missing/corrupt = no preferences.
+    // Corrupt = no preferences.
+  }
+  return undefined;
+}
+
+/**
+ * Preferences, from the current file or — once — from the one the extension wrote under its former
+ * name. A legacy hit is written forward immediately, so the next read is a plain read and the old
+ * file stops mattering. It is left on disk: it is the user's, and deleting it buys nothing.
+ */
+export async function loadPrefs(homeDir?: string): Promise<GlobalPrefs> {
+  const { readFile } = await import("node:fs/promises");
+  try {
+    const current = readPrefsFile(await readFile(prefsPath(homeDir), "utf8"));
+    if (current) return current;
+  } catch {
+    // Absent: try the old location before giving up.
+  }
+  try {
+    const legacy = readPrefsFile(await readFile(legacyPrefsPath(homeDir), "utf8"));
+    if (legacy) {
+      await savePrefs(legacy, homeDir);
+      return legacy;
+    }
+  } catch {
+    // Neither file: no preferences.
   }
   return {};
 }

@@ -1,5 +1,5 @@
 /**
- * pi-worktree agent policy.
+ * pid-worktree agent policy.
  *
  * Keeps the injected system prompt short: facts about where the session is
  * working plus when the model should reach for the worktree tools instead of
@@ -41,7 +41,7 @@ function plural(n: number, noun: string): string {
 }
 
 export function buildPolicySection(f: PolicyFacts): string {
-  const lines: string[] = ["## pi-worktree policy (native)"];
+  const lines: string[] = ["## pid-worktree policy (native)"];
   if (f.bound) {
     const b = f.bound;
     const from = b.originBranch ? `\`${b.originBranch}\`` : "its origin";

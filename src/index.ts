@@ -1,5 +1,5 @@
 /**
- * pi-worktree — native git worktree flow for pi.
+ * pid-worktree — native git worktree flow for pi.
  *
  * Two user commands, everything else belongs to the model:
  * - `/worktree [task]` isolates work into a new worktree, binds the session
@@ -9,7 +9,7 @@
  * - Status, abandon, conflict continuation and strategy details live in the
  *   worktree_* tools + policy, not in user-facing flags.
  *
- * Linkage is stored per link in `<git-common-dir>/pi-worktree/` so it
+ * Linkage is stored per link in `<git-common-dir>/pid-worktree/` so it
  * survives `cd` + fresh sessions on either side, plus session entries for
  * the current branch view.
  */
@@ -86,11 +86,17 @@ import {
   type WorktreeStore,
 } from "./state.ts";
 
-const WIDGET_KEY = "pi-worktree";
-const STATUS_KEY = "pi-worktree";
-const CARD_TYPE = "pi-worktree";
-const LINK_ENTRY = "pi-worktree-link";
-const EVENT_ENTRY = "pi-worktree-event";
+const WIDGET_KEY = "pid-worktree";
+const STATUS_KEY = "pid-worktree";
+const CARD_TYPE = "pid-worktree";
+/**
+ * The `customType` this extension wrote before it was renamed. Cards already in a session file
+ * carry it, and a renderer is looked up by exact type — so the old name stays registered and those
+ * transcripts keep drawing. Nothing new is ever written under it.
+ */
+const LEGACY_CARD_TYPE = "pi-worktree";
+const LINK_ENTRY = "pid-worktree-link";
+const EVENT_ENTRY = "pid-worktree-event";
 
 type Strategy = LandStrategy;
 const DEFAULT_STRATEGY: Strategy = "rebase";
@@ -357,7 +363,7 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // Transcript visual language: every pi-worktree block is purple
+  // Transcript visual language: every pid-worktree block is purple
   // (toolPendingBg). A caps LABEL plus the hero in 【】 lead; rows hang off a
   // dim `├─`/`└─`/`│` diagram tree (counts and names readable, conflict files
   // brightest — they need action). Emoji mark the
@@ -563,7 +569,7 @@ export default function (pi: ExtensionAPI) {
   }
 
 
-  pi.registerMessageRenderer(CARD_TYPE, (message, opts, theme) => {
+  const renderCard: Parameters<typeof pi.registerMessageRenderer>[1] = (message, opts, theme) => {
     const full = typeof message.content === "string" ? message.content : "";
     const d = message.details as CardDetails | undefined;
     const ink = makeInk(theme);
@@ -577,7 +583,11 @@ export default function (pi: ExtensionAPI) {
       return block((w) => abandonText(d, ink, w));
     }
     return block(ink.error(`❌ ${firstLine(full)}`));
-  });
+  };
+
+  // Both names, one renderer: a session opened from before the rename still draws its cards.
+  pi.registerMessageRenderer(CARD_TYPE, renderCard);
+  pi.registerMessageRenderer(LEGACY_CARD_TYPE, renderCard);
 
   // ------------------------------------------------------------- create flow
 
@@ -658,7 +668,7 @@ export default function (pi: ExtensionAPI) {
     let carryNote = "clean — nothing to carry";
     const selective = !!opts.carryPaths?.length;
     if (opts.carry && !facts.clean) {
-      const res = await carryChangesViaStash(exec, cwd, targetPath, `pi-worktree:${branch}`, undefined, selective ? opts.carryPaths : undefined);
+      const res = await carryChangesViaStash(exec, cwd, targetPath, `pid-worktree:${branch}`, undefined, selective ? opts.carryPaths : undefined);
       carried = res.carried;
       const n = opts.carryPaths?.length ?? 0;
       carryNote = res.carried
@@ -1240,7 +1250,7 @@ export default function (pi: ExtensionAPI) {
     name: "worktree_status",
     label: "Worktree Status",
     description:
-      "Show git worktree state: current branch, clean/dirty files, all worktrees, pi-worktree origin/child linkage, and which worktree this session is bound to. Call this before risky edits to decide whether to isolate.",
+      "Show git worktree state: current branch, clean/dirty files, all worktrees, pid-worktree origin/child linkage, and which worktree this session is bound to. Call this before risky edits to decide whether to isolate.",
     parameters: Type.Object({}),
     async execute(_id, _params, signal, _onUpdate, ctx) {
       const cwd = ctx.cwd;

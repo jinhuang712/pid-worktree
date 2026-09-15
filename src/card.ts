@@ -1,7 +1,7 @@
 import { wrapTextWithAnsi, visibleWidth } from "@earendil-works/pi-tui";
 
 /**
- * Diagram-tree layout shared by every pi-worktree card.
+ * Diagram-tree layout shared by every pid-worktree card.
  *
  * Rows (commits, files, carried files, checkpoints) hang off `├─`/`└─` stems
  * with `│` continuations, so the block reads as one diagram: the row head

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -10,6 +10,7 @@ import {
   findByWorktree,
   foreignOwnerOf,
   isInside,
+  legacyPrefsPath,
   loadPrefs,
   loadStore,
   markLanded,
@@ -20,7 +21,7 @@ import {
   savePrefs,
   saveStore,
   STORE_DIR,
-  storePath,
+  legacyStorePath,
   upsertLink,
   ownActiveLink,
   visibleKidsFor,
@@ -143,12 +144,12 @@ test("per-link files: a stale snapshot cannot clobber another session's link", a
 
 test("legacy single-file store migrates to per-link files once", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-worktree-state-"));
-  writeFileSync(storePath(dir), JSON.stringify({ version: 1, links: [link({ id: "legacy" })] }));
+  writeFileSync(legacyStorePath(dir), JSON.stringify({ version: 1, links: [link({ id: "legacy" })] }));
   const loaded = await loadStore(dir);
   assert.equal(loaded.links.length, 1);
   assert.equal(loaded.links[0].id, "legacy");
   assert.ok(existsSync(join(dir, STORE_DIR, "legacy.json")));
-  assert.ok(!existsSync(storePath(dir)));
+  assert.ok(!existsSync(legacyStorePath(dir)));
   assert.equal((await loadStore(dir)).links.length, 1);
 });
 
@@ -165,10 +166,32 @@ test("global prefs roundtrip in an isolated home", async () => {
   await savePrefs({ defaultStrategy: "squash" }, home);
   assert.deepEqual(await loadPrefs(home), { defaultStrategy: "squash" });
   // Corrupt file reads as no preferences, never throws.
-  writeFileSync(join(home, ".pi", "agent", "pi-worktree", "config.json"), "{oops");
+  writeFileSync(join(home, ".pi", "agent", "pid-worktree", "config.json"), "{oops");
   assert.deepEqual(await loadPrefs(home), {});
 });
 
+test("prefs written under the former name are read once and moved forward", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-wt-legacy-prefs-"));
+  mkdirSync(join(home, ".pi", "agent", "pi-worktree"), { recursive: true });
+  writeFileSync(legacyPrefsPath(home), JSON.stringify({ defaultStrategy: "merge" }));
+
+  assert.deepEqual(await loadPrefs(home), { defaultStrategy: "merge" });
+  // Migrated on that first read, so the current file now answers on its own.
+  assert.ok(existsSync(prefsPath(home)));
+  assert.deepEqual(JSON.parse(readFileSync(prefsPath(home), "utf8")), { defaultStrategy: "merge" });
+  // The old file is the user's; it stays where it is.
+  assert.ok(existsSync(legacyPrefsPath(home)));
+});
+
+test("the current file wins over one left under the former name", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-wt-both-prefs-"));
+  mkdirSync(join(home, ".pi", "agent", "pi-worktree"), { recursive: true });
+  writeFileSync(legacyPrefsPath(home), JSON.stringify({ defaultStrategy: "merge" }));
+  await savePrefs({ defaultStrategy: "rebase" }, home);
+  assert.deepEqual(await loadPrefs(home), { defaultStrategy: "rebase" });
+});
+
 test("prefsPath falls back to ~/.pi/agent layout", () => {
-  assert.ok(prefsPath("/home/u").endsWith("/home/u/.pi/agent/pi-worktree/config.json"));
+  assert.ok(prefsPath("/home/u").endsWith("/home/u/.pi/agent/pid-worktree/config.json"));
+  assert.ok(legacyPrefsPath("/home/u").endsWith("/home/u/.pi/agent/pi-worktree/config.json"));
 });

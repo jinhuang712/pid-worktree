@@ -1,5 +1,5 @@
 /**
- * pi-worktree git helpers.
+ * pid-worktree git helpers.
  *
  * All git I/O goes through an injected `ExecFn` so unit tests can stub it
  * and the extension entry can wire it to `pi.exec`. Pure parsers stay

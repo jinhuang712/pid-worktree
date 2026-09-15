@@ -185,7 +185,7 @@ Land straight back into the origin — zero popups. Direction is DWIM: standing 
                                                +---------+    card, full stop
 ```
 
-- **Strategy is asked once, remembered everywhere** (`~/.pi/agent/pi-worktree/config.json`). First `/land` asks rebase / squash / merge a single time; from then on that mode is the default and every land line shows it. An explicit `--strategy` wins for that run and becomes the new default.
+- **Strategy is asked once, remembered everywhere** (`~/.pi/agent/pid-worktree/config.json`). First `/land` asks rebase / squash / merge a single time; from then on that mode is the default and every land line shows it. An explicit `--strategy` wins for that run and becomes the new default.
 - Pending changes on both sides are checkpoint-committed first (the worktree's uses the task as its subject, the origin's is marked `wip(<branch>): checkpoint before landing …`). The origin's checkpoint is shown as a trailing `N files checkpointed on <branch>` row — auto-created commits stay visible; the worktree's own checkpoint is folded into the landed commit list it produced, so the card never repeats the same subject twice. Land cards keep the commit summary and subjects separate from the file summary and paths.
 - Empty worktrees land as cleanup: no commits and no changes means the worktree directory is removed, the branch deleted and the session unbound in the same `/land` — no second `abandon` step.
 
