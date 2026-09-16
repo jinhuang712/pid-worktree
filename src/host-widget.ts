@@ -11,8 +11,8 @@
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-/** `<ns>:<kind>/v<n>`: namespace this extension, kind what the payload holds. */
-export const BINDING_WIDGET_KEY = "worktree:binding/v1";
+/** This extension's name. A widget key is an identity, so the host routes the lines back by it. */
+export const BINDING_WIDGET_KEY = "pid-worktree";
 
 export interface BoundWorktree {
   branch: string;
