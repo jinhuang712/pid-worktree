@@ -4,8 +4,95 @@ All notable changes to `pid-worktree` are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **The worktree line started counting, and stopped being a sentence.** It carries the worktree's
+  whole state against its origin — `4 files`, `+58`, `−11`, ahead, dirty — read with the same
+  commands the tool would use, committed and uncommitted together (a two-dot diff on purpose), so the
+  number moves while you work instead of only when you commit. A quiet worktree shows no numbers
+  rather than `0 files`. It sits on the session title bar's second line, beside the folder, and is
+  drawn as objects rather than as text: the branch and where it lands are one tinted chip, the line
+  counts keep green and red, and the rest stays quiet — a row to read at a glance instead of parse.
+- **Claiming the header no longer costs the branch.** PID stands its own branch chip down as soon as
+  any extension registers a header, so a session sitting in a repo with no worktree showed a folder
+  and nothing else. The chrome publishes the branch too, drawn as the plain faint name PID would have
+  shown — nothing added, nothing to explain.
+- **Only this session's own worktree is shown, and only while it is open.** A window used to get a
+  roll-up instead: the origin's children, or every repo under a folder that is not itself a repo
+  (`🌲 8 projects · all on their own branch`). Both are someone else's worktree, in a line whose whole
+  justification is that *this* session opened one. A session with nothing open now says nothing, and
+  the workspace view is gone entirely — along with the project discovery that existed to feed it.
+- **Every worktree-changing tool call the agent starts on its own is put to the user first.**
+  `worktree_create`, `worktree_land` and `worktree_abandon` are stopped in the `tool_call` hook and
+  turned into a question carrying the numbers that matter — the branch, how many files carry and
+  which, the commits and files a land would merge, the strategy it would use. `worktree_status` is
+  never gated: reading git state is not a decision. Details:
+  - **A window is asked in the transcript, not in a modal.** The call is stopped, the card appears on
+    the row where the call itself is, and two buttons answer it — the run ends cleanly instead of a
+    dialog taking the window to ask one question. The card is composed from `ask-view.ts` with PID's
+    own primitives, so `+12` is green, `−3` is red, and a status letter is a tinted badge.
+  - **The question stays in sight after the run.** The run ending is what folds a finished turn's
+    steps behind one `Worked for …` line, and the card is one of those steps — so the row says
+    `asks` while the question stands and PID leaves it unfolded. Buttons that a fold can take away
+    are not buttons.
+  - **A terminal is asked in a dialog**, because it has nowhere else to put a card — painted from the
+    same fields, so both surfaces show the same rows.
+  - **The answer is a command, not a second tool**: `/worktree-answer yes|no`. A yes arms the gate
+    and hands the model back the call it already made, parameters and all, so the tool runs once,
+    where it has always run. That also means the buttons work by hand and by keyboard.
+  - **A command the user typed is already the answer.** `/worktree` arms `create` and `/land` arms
+    `land`, so a decision just made is not asked again; `abort:true` (the undo, not the landing)
+    passes for the same reason.
+  - **One answer per run, both ways.** A yes is remembered, so a conflict's `finish:true` does not
+    re-ask; a no is remembered too, and a retry is blocked without a second card. A question still on
+    screen outlives the run that raised it and is only cleared by an answer.
+  - **No dialogs, no questions.** In print and json runs (`ctx.hasUI === false`) everything is
+    allowed — a question nobody can answer must not hang the agent.
+  - **The model says what it did, in its own words, before it lands.** The card carries the numbers
+    and no card can say what was decided, what was verified or what is still unsure — so the recap
+    is asked for everywhere the model looks: the `worktree_create`/`worktree_land` guidelines, the
+    bound-session policy, the `/worktree` hand-off, and the approval hand-back that sends it to
+    re-issue the call. It writes the paragraph, then the call goes to the user.
+  - The policy now says the host asks, so the model calls the tool instead of raising the question in
+    prose, and a blocked call tells it to stop trying and continue where the work already is.
+
 ### Fixed
 
+- **The card waits for the model to say what it is about.** A gated call that carried no words for
+  the user used to raise its card anyway, so the question arrived with nothing above it — the user
+  being asked to approve something nobody had described. The call is now stopped *before* a card
+  exists (nothing drawn, nothing held, the turn continues), and the model is told to write the
+  paragraph and ask again. Once per kind per run: a model that ignores it gets its card, because a
+  nudge that can loop is worse than a quiet card.
+
+- **A question is a card, so no card means no question.** Three cases ended a run with a question
+  nobody could see: no repository, no link to describe, and a worktree with nothing in it (the
+  landing is cleanup, not a decision). The call runs now and the tool's own answer is the row. The
+  card that used to appear for the empty case read `nothing new · nothing to clean` — an approval
+  for nothing, which is not a question either.
+- **One question at a time.** Two open cards left the first unattachable: the buttons answer the
+  newest, so clicking the first one answered the second. A second gated call is held with a reason
+  that says which question is in the way, and the model is told to wait rather than to retry.
+- **`worktree_abandon confirm:false` is not a question.** The dry run deletes nothing; only the real
+  one is put to the user.
+- **A land card no longer says `nothing new · nothing to clean` over uncommitted work.** It counted
+  `base..HEAD` alone, so a worktree whose work was still in the working tree — the ordinary case,
+  because the agent finishes before it commits anything — was put up for approval as nothing at all:
+  the paragraph above it described two changed files and the card below it denied them. The card now
+  counts what the landing actually carries: the commits ahead, the uncommitted work as the single
+  checkpoint commit it will write (task as subject, so it counts), the untracked files a two-dot
+  diff cannot see, and the origin's own pending files, which the landing checkpoints before it
+  merges — the last one is work in *someone's* working tree, and approving a landing that commits it
+  should say so.
+
+- **A window showed no worktree at all.** `refreshChrome` read `ctx.ui.theme` before doing anything
+  else and then painted with it — but PID's worker hands out `theme: undefined` (its theme list is
+  empty when the extension context is built) while declaring the member served. The read threw, the
+  function's own `catch` swallowed it, and **nothing was ever published**: no binding, no children,
+  no line above the conversation. The chrome paints only for a terminal now, outside one it never
+  touches the theme, and the binding is published either way. Caught by driving PID itself headless
+  (`PID_HEADLESS=1 PID_DUMP_DIR=…`, an invisible window that dumps what it painted) rather than by
+  reading the code.
 - **A window no longer shows the worktree twice.** The ANSI-painted widget line and the status
   belong to a terminal; a host that is not one was handed them *and* the `worktree:binding/v1`
   payload, so PID painted the binding in the session title bar and the stripped string in the

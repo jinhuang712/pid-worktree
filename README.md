@@ -291,26 +291,128 @@ One file per link, in the shared git dir, so it survives `cd` and fresh sessions
   standing inside it .... YES (possession counts)
 ```
 
-The TUI widget shows readiness at a glance: `🌲 wt-fix-login → main · fix login retry · ↑3 · ↓1 · 2 dirty` (commits ahead, origin commits behind, uncommitted files), refreshed after every agent run. Origins show their own plus unowned children.
+The **session title bar** carries the worktree on its second line, beside the folder — and only when this session has one open:
 
-Transcript contract: every pid-worktree action renders exactly one purple block — a caps `LABEL` plus the hero in `【】`, rows hanging off one dim `├─`/`└─`/`│` diagram tree (`WORKTREE`, `LAND`, `LAND CONFLICT`, `ABANDON`, `ERROR`). Every row is listed — no caps — and file rows (both `WORKTREE` and `LAND`) are a table: status letter, path, `+N`/`-N` (additions green, deletions red, zeros dim), columns padded to the widest cell. Cards render against the real terminal width: long commit subjects wrap onto the next line, hanging under their text instead of being clipped. No absolute paths, no green/red blocks; full output is one expand away. Cards signal state changes with the smallest effective payload — explanations and decisions belong to the model's own words.
+```text
+  open worktree ... 📁 repo   (🌲 wt-gate → main)  +58  −11   4 files   ↑3   1 dirty
+  no worktree ..... 📁 repo   main
+```
 
-## Agent tools
+Two shapes, and the rule between them is the point: a worktree belongs to the session that opened it. Nothing else appears here — not another session's worktrees, not a roll-up of the repos under the folder. A folder of eight projects with nothing open says nothing at all.
 
-| Tool | Purpose |
-| --- | --- |
-| `worktree_status` | Branch, clean/dirty files, all worktrees, origin/child linkage and the session's bound worktree. Silent in the transcript (pure triage plumbing). The model calls this before risky edits to decide whether to isolate. |
-| `worktree_create` | The agent's `/worktree`: triages dirty files (`carryPaths`), names the branch itself (collisions auto-bump), binds the session, never prompts. Renders one purple `WORKTREE` block. |
-| `worktree_land` | The agent's `/land` with `strategy` (remembered preference when omitted), `finish:true` / `abort:true` for conflict flows. Renders one purple `LAND` block. Resolves conflicts itself and explains; asks only on genuine contradiction. |
-| `worktree_abandon` | Discard a worktree without landing. A dry run without `confirm:true` reports the unlanded commits and dirty files to lose; the model must confirm with you before passing `confirm:true`. Renders one purple `ABANDON` block. |
+When one *is* open it is drawn as objects rather than as a sentence: the branch and where it lands are one tinted chip, the line counts keep their own colours, and the secondary counts stay quiet — so the row is read at a glance instead of parsed. The numbers are the worktree's *whole* state against its origin, committed and uncommitted together (`git diff --shortstat <originBranch>`, two-dot on purpose), which is the count a person watching expects to move. A quiet worktree shows no numbers rather than `0 files`.
 
-Every turn, a short policy section is appended to the system prompt:
+The second shape is not decoration either: registering a header mount makes PID stand its own branch chip down, so an extension that renders a header owes that chip back. It is drawn as a plain faint branch name — the same thing PID would have shown, with nothing added.
 
-- Bound → the working root, that paths are re-rooted, and to ask before `worktree_land` / `worktree_abandon`.
-- `CLEAN` plus an experimental, risky, or parallel task → proactively offer or call `worktree_create`.
-- `DIRTY` plus a new task → do not mix it into the dirty files; suggest `/worktree`.
-- One session, one tree: a bare land/abandon resolves your own link and never auto-grabs another session's; name one explicitly only for a deliberate takeover.
-- Never run raw `git worktree add/remove` — use the tools so linkage stays consistent.
+## The approval gate
+
+Isolating work, landing it and throwing it away change where the work lives. When the agent decides
+that on its own the call is stopped in the `tool_call` hook and put to the user first, as a card
+carrying the numbers that matter:
+
+```text
+🌲 New worktree?
+   └─ 🌲 WORKTREE 【main -> wt-gate】
+         └─ carrying 2 of 5 files · 3 left in origin
+            ├─ N  src/gate.ts    +4  -0
+            └─ N  src/policy.ts  +1  -0
+
+🌲 Land this worktree?
+   └─ 🌲 LAND 【wt-gate -> main】 · will rebase
+         ├─ 2 commits
+         │  ├─ feat(gate): ask before isolating
+         │  └─ test(gate): cover the decline path
+         └─ 4 files
+            ├─ U  src/gate.ts          +12   -3
+            └─ N  test/gate.test.ts    +40   -0
+```
+
+Every number is read *before* anything happens, from the same helpers the tool would use — so the
+question says `will rebase`, never `rebased`.
+
+**Where the card lands depends on the host.** A terminal has nowhere to put it, so it is a dialog,
+painted from these fields. A graphical host draws it in the transcript, on the row where the call
+itself is, with two buttons — no modal takes the window to ask one question. That row also declares
+`asks`, so a run that ends with a question outstanding does not fold it away with the rest of the
+turn's steps: a button nobody can see is not an answer. Both surfaces are built from the same
+structure: `src/ask-view.ts` decides what the card says, `src/ui.tsx` composes PID's primitives over
+it, and the terminal renders the same fields through `diagramTree`/`fileColumns`.
+
+The buttons run one command, `/worktree-answer yes|no` — which is also how a terminal user answers
+by hand:
+
+```text
+  who is asked?
+  -------------
+
+  the agent's own initiative ......... ASKED   (create / land / abandon, the real thing)
+  /worktree already typed ............ no      (the command armed create)
+  /land already typed ................. no      (the command armed land, incl. finish:true)
+  worktree_land abort:true ............ no      (the undo, not the landing)
+  worktree_abandon confirm:false ...... no      (the dry run deletes nothing)
+  worktree_status ..................... no      (triage plumbing, never gated)
+  a worktree with nothing in it ....... no      (landing it is cleanup, not a decision)
+  --print / --mode json ............... no      (no dialogs to raise)
+
+  and the two that look like questions but are not:
+  this session already holds one ...... no      (a second create only errors)
+  a target that is not this session's . ASKED   (a takeover: no numbers, but the fact that matters)
+
+  and when the question cannot be put to anyone:
+  no card can be written .............. no      (no repo, no link: the tool's own error answers)
+  a question is already open .......... HELD    (one at a time; the model is told to wait)
+  nothing said to the user yet ........ HELD    (the card goes under the paragraph; asked once)
+```
+
+**The card describes the worktree that will actually change.** A `target` naming something this
+session does not hold is a takeover, and it gets its own card — the host cannot read that worktree's
+numbers, but it can state the one fact that matters, that this is not the user's own tree. Naming
+the session's *own* link by branch or by path stays an ordinary card: `namesSameWorktree` compares
+canonically so `/repo.worktrees/x` and `x` are not two different worktrees.
+
+**A question is a card, and a card is the question.** The rule that falls out of that: when the
+answer cannot be *shown* — no repository, no link to describe, nothing in the worktree to lose —
+there is nothing to ask, so the call runs and answers for itself. A blocked call with no card would
+end the run on a question nobody can see or click.
+
+**One question at a time.** Two open cards would leave the first unattachable: the buttons answer a
+question, and a person looking at two of them cannot tell which one they are answering. A second
+gated call is held with `Waiting on the user: a question about … is already in the transcript`, and
+frees itself the moment the first is answered.
+
+**What the card counts is what the landing carries.** Before merging, a landing commits both sides:
+the worktree's pending work goes in as one checkpoint commit (the task as its subject) and the
+origin's pending work as `wip(<branch>)`. So the card counts the commits ahead *plus* that
+checkpoint, lists the tracked files changed against the base (committed and uncommitted together,
+two-dot), the untracked files a two-dot diff cannot see, and says a line about the origin's own
+pending files — work in *someone's* working tree that this approval is about to commit.
+
+**A yes is a hand-back, not a bypass.** It arms the gate and tells the model to re-issue the call it
+already made, parameters and all — so the tool runs once, where it has always run, with all its cards
+and cleanup intact. One answer per run in both directions: a yes is remembered, so a conflict's
+`finish:true` does not re-ask; a no is remembered too, and a retry is blocked without a second card.
+A question still on screen outlives the run that raised it, and only an answer clears it.
+
+**A question does not survive the process.** It lives in the extension's memory, so a restart (or
+PID reopening the session) drops it: the row falls back to its one-line record and the model's next
+attempt asks again. That is deliberate — a question whose process is gone has no gate behind it
+either, and re-asking is honest where a stale card would not be.
+
+**The paragraph comes first — and the gate enforces it.** A card states numbers; it cannot say what
+was decided, what was verified or what is still unsure, and a question with nothing above it is a
+decision the user cannot make. So a gated call that carries no words for the user is stopped before
+a card exists: nothing is drawn, nothing is held, and the model keeps its turn with
+`Approval held: nothing said to the user about … yet.` It writes the paragraph, calls again, and the
+card appears *under* it. Once per kind per run — a model that ignores the nudge gets its card anyway,
+because a loop is worse than a quiet card. The instructions say the same thing in four more places
+(the tool guidelines, the bound-session policy, the `/worktree` hand-off, the approval hand-back),
+so this is the floor, not the only ask.
+
+A decline reaches the model as `The user declined to open a worktree. Do not retry;` — so the work
+continues where it already is, and the model says so in one line.
+
+Because the host asks, the policy tells the model to *call* the tool rather than raise the question
+in prose: the model speaks about work, the host asks about permission.
 
 ## Safety
 
