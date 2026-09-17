@@ -38,6 +38,9 @@ test("publishes the binding as numbers, with no escape codes", () => {
       worktreePath: "/repo/.worktrees/fix-login",
       originPath: "/repo",
       inside: true,
+      files: 4,
+      added: 58,
+      deleted: 11,
     },
   });
   assert.equal(calls.length, 1);
@@ -49,14 +52,14 @@ test("publishes the binding as numbers, with no escape codes", () => {
   assert.equal(calls[0].lines?.[0].includes(""), false);
 });
 
-test("publishes children when the session owns worktrees from its origin", () => {
+test("publishes the plain branch when no worktree is open", () => {
   const { ctx, calls } = fakeCtx("rpc", true);
-  publishBinding(ctx, {
-    children: [{ branch: "wt-a", worktreePath: "/repo/.worktrees/a" }],
-  });
+  publishBinding(ctx, { repo: { branch: "main" } });
   const payload = JSON.parse(calls[0].lines?.[0] ?? "{}");
-  assert.equal(payload.children.length, 1);
-  assert.equal(payload.children[0].branch, "wt-a");
+  assert.deepEqual(payload.repo, { branch: "main" });
+  // Nothing worktree-shaped rides along: no chip, no counts, nothing to explain.
+  assert.equal(payload.binding, undefined);
+  assert.equal(payload.ask, undefined);
 });
 
 test("clears with undefined", () => {
@@ -67,7 +70,7 @@ test("clears with undefined", () => {
 
 test("stays out of a terminal", () => {
   const { ctx, calls } = fakeCtx("tui", true);
-  publishBinding(ctx, { children: [] });
+  publishBinding(ctx, { repo: { branch: "main" } });
   assert.deepEqual(calls, []);
 });
 
@@ -81,5 +84,5 @@ test("never throws, so chrome cannot break the session", () => {
       },
     },
   } as unknown as ExtensionContext;
-  assert.doesNotThrow(() => publishBinding(ctx, { children: [] }));
+  assert.doesNotThrow(() => publishBinding(ctx, { repo: { branch: "main" } }));
 });

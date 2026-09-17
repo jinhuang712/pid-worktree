@@ -22,6 +22,10 @@ export interface BoundWorktree {
   behind: number;
   /** Working-tree entries `git status --porcelain` reports. */
   dirty: number;
+  /** Files this worktree has that the origin does not — committed and uncommitted together. */
+  files: number;
+  added: number;
+  deleted: number;
   task?: string;
   worktreePath: string;
   originPath: string;
@@ -29,15 +33,68 @@ export interface BoundWorktree {
   inside: boolean;
 }
 
-export interface ChildWorktree {
-  branch: string;
-  worktreePath: string;
+/** One file in the card: the same cells the terminal's table pads into columns. */
+export interface AskFile {
+  /** Raw git status letter (A, M, D, R…). The desktop half maps it to its own badge. */
+  status: string;
+  path: string;
+  /** Lines added/deleted; null for a binary file. */
+  added: number | null;
+  deleted: number | null;
 }
 
-/** Exactly one of these is set, matching the two shapes of the terminal line. */
+/**
+ * A question the agent half is waiting on.
+ *
+ * Structured rather than painted, because the desktop half composes PID's own primitives from it
+ * — the terminal paints the same fields with `diagramTree`/`fileColumns`, so one card has two
+ * renderings instead of two cards.
+ */
+export interface AskCard {
+  kind: "create" | "land" | "abandon";
+  /** `main -> wt-gate` — the same hero the terminal puts in `【】`. */
+  hero: string;
+  /** A verb phrase for a land that has not happened: `will rebase`. */
+  note?: string;
+  /** The one line that says what happens: `carrying 2 of 5 files · 3 left in origin`. */
+  summary?: string;
+  /** Commits the merge would carry; with it, the file list is headed by its own count. */
+  commitCount?: number;
+  /** Commit subjects the merge would carry, newest first. */
+  commits?: string[];
+  /** Files in play. */
+  files?: AskFile[];
+}
+
+/** The card, plus which tool call raised it — so the transcript row that holds the id draws it. */
+export interface PendingAsk extends AskCard {
+  /** `toolCallId` of the call this question is blocking. */
+  id: string;
+  /**
+   * Set once the user has answered, and only then: the card keeps its numbers and drops its buttons,
+   * so the decision they just made stays where they made it. Cleared when the run it handed back to
+   * the model is over — from there the row is a line in the transcript like any other.
+   */
+  answer?: "yes" | "no";
+}
+
+/** Exactly one of these is set, matching the shapes of the terminal line. */
 export interface WorktreeWidget {
+  /**
+   * The session's own worktree. The only shape a window draws: a worktree belongs to the session
+   * that opened it, and a summary of everyone else's is noise in someone else's window.
+   */
   binding?: BoundWorktree;
-  children?: ChildWorktree[];
+  /**
+   * The branch the session is on when it has no worktree.
+   *
+   * Claiming a header mount makes PID stand its own branch chip down, so an extension that renders a
+   * header owes that chip back. Nothing more: no counts, no chip, no worktree vocabulary — the same
+   * thing PID would have drawn.
+   */
+  repo?: { branch: string | null };
+  /** Set while a worktree-changing call is waiting for the user's answer. */
+  ask?: PendingAsk;
 }
 
 /** A host that draws, but not in a terminal. `hasUI` alone is true in a terminal too. */

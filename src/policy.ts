@@ -27,9 +27,11 @@ export interface PolicyFacts {
 
 export const WORKTREE_GUIDELINES = [
   "Use worktree_status to check git cleanliness before risky edits; use worktree_create to isolate experimental work, worktree_land to merge a linked worktree back, and worktree_abandon to discard one.",
-  "When the workspace is CLEAN and the task is experimental, risky, or explicitly parallel, proactively offer or call worktree_create instead of editing in place.",
+  "When the workspace is CLEAN and the task is experimental, risky, or explicitly parallel, call worktree_create instead of editing in place. The host asks the user to approve and blocks the call if they decline — never raise that question yourself.",
   "Never run raw `git worktree add/remove` shell commands; use the worktree_* tools so origin linkage stays consistent.",
-  "When work in a linked worktree is finished, ask the user before calling worktree_land — never land or merge silently. Empty worktrees (no commits, clean) are the exception: land/abandon cleans them up immediately with no confirmation needed.",
+  "When work in a linked worktree is finished, call worktree_land to finish — the host puts the question to the user first, so never land silently and never ask in prose. Write the paragraph they are owed first: what changed, what you verified, what the conclusion is — the card shows the numbers, and no card can say what you decided. Empty worktrees (no commits, clean) are the exception: land/abandon cleans them up immediately with no confirmation needed.",
+  "Before calling worktree_create, say in one or two lines what you are isolating, on which branch, and what stays in the origin.",
+  "A blocked worktree_* call means the user declined. Stop trying, keep working where the work already is, and say in one line that you stayed.",
   "A bare worktree_land/worktree_abandon means YOUR tree: it resolves this session's own link (or the worktree you're standing in) and never auto-grabs another session's link. Name a branch/path explicitly only to deliberately take one over — then say who owned it and what you did.",
   "Conflicts are yours to resolve with worktree_land: read each conflicted file, keep the intended result from both sides, `git add`, then finish with finish:true. Explain the resolution; ask the user only when both sides look deliberately contradictory.",
   "One active worktree per session per repo: reuse the owned link instead of calling worktree_create again; call worktree_land first when its work is done.",
@@ -54,7 +56,7 @@ export function buildPolicySection(f: PolicyFacts): string {
         : "- Relative paths and bash commands are re-rooted into the working root automatically — do not prefix `cd`, do not use origin paths for edits (edits under the origin checkout are blocked; reading it for comparison is fine).",
     );
     lines.push(
-      "- When the task is done, ask the user whether to land instead of landing silently; run worktree_land (or tell the user to run /land) only after confirmation. Empty worktrees (no commits, clean) need no confirmation — land/abandon removes them immediately. To throw non-empty work away, worktree_abandon (needs confirmation).",
+      "- When the task is done, write the paragraph the user is owed — what changed, what you verified, what the conclusion is — and then call worktree_land. The host shows the user what would land and asks them; a decline comes back as a blocked call, so never ask for approval in prose and never land silently. Empty worktrees (no commits, clean) need no confirmation — land/abandon removes them immediately. To throw non-empty work away, worktree_abandon (the host asks too).",
     );
   } else {
     const where = f.branch ? `branch \`${f.branch}\`` : "detached HEAD";
@@ -66,7 +68,7 @@ export function buildPolicySection(f: PolicyFacts): string {
       );
     } else if (f.clean) {
       lines.push(
-        "- Workspace is CLEAN: ideal for isolation. For experimental/refactor/parallel tasks, proactively suggest `/worktree <task>` or call worktree_create before making changes.",
+        "- Workspace is CLEAN: ideal for isolation. For experimental/refactor/parallel tasks, call worktree_create (or suggest `/worktree <task>`) before making changes — the host asks the user to approve, so you do not need to. Say in one or two lines what you are isolating and on which branch before you call it.",
       );
     } else {
       lines.push(
