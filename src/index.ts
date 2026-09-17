@@ -25,8 +25,10 @@ import { Box, Container, truncateToWidth, visibleWidth, wrapTextWithAnsi, type C
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { rewriteToolInput, type Binding } from "./bind.ts";
+import { worktreeLine } from "./ask-view.ts";
 import { diagramTree, fileColumns, type DiagramRow } from "./card.ts";
-import { publishBinding } from "./host-widget.ts";
+import { Gate, awaitingReason, deniedReason, explainFirstReason, gateKind, waitingOnOtherReason, type GateKind } from "./gate.ts";
+import { publishBinding, type AskCard, type PendingAsk } from "./host-widget.ts";
 import {
   abortMerge,
   aheadBehind,
@@ -42,12 +44,15 @@ import {
   diffStat,
   ensureCommitted,
   getCommonDir,
+  getCurrentBranch,
   getStatusPorcelain,
   getTopLevel,
   hasMergeHead,
   isDetached,
   isWorkTree,
   listWorktrees,
+  worktreeChanges,
+  worktreeStat,
   mergeInto,
   porcelainPaths,
   pruneWorktrees,
@@ -131,6 +136,33 @@ function emit(ctx: ExtensionContext, text: string, level: "info" | "warning" | "
   (level === "error" ? console.error : console.log)(text);
 }
 
+/**
+ * Whether the newest thing in the session is the model talking to the user.
+ *
+ * The call being gated rides in an assistant message, and Pi has already written that message to the
+ * session by the time a tool runs — so "the last message is the model's, and it says something" is
+ * the same question as "does this call carry words for the user". Anything else at the tail (a tool
+ * result, a user message, nothing at all) means the model went straight from work to a decision.
+ */
+function saidToUser(ctx: ExtensionContext): boolean {
+  try {
+    const entries = ctx.sessionManager.getEntries();
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i] as { type?: string; message?: { role?: string; content?: unknown } };
+      if (e?.type !== "message" || !e.message) continue;
+      if (e.message.role !== "assistant") return false;
+      const content = Array.isArray(e.message.content) ? e.message.content : [];
+      return content.some(
+        (c) => (c as { type?: string; text?: string })?.type === "text" && ((c as { text?: string }).text ?? "").trim() !== "",
+      );
+    }
+  } catch {
+    // A session whose entries cannot be read must not block a call: this is a bedside manner check,
+    // not a safety one.
+  }
+  return true;
+}
+
 /** Load linkage self-healed against `git worktree list`; falls back to the raw
  *  store when git is unavailable so reads never break. */
 async function loadSyncedStore(exec: ExecFn, cwd: string, commonDir: string): Promise<WorktreeStore> {
@@ -158,7 +190,15 @@ function parseWorktreeArgs(raw: string): {
   help: boolean;
   task: string;
 } {
-  const tokens = raw.trim().split(/\s+/).filter(Boolean);
+  // Tokens with their offsets, so the task can be cut out of the raw string instead of rebuilt
+  // from tokens: it is a prompt the user typed, and joining words back together flattens their
+  // line breaks and their whole `<attachments>` block onto one line.
+  const tokens: { text: string; start: number; end: number }[] = [];
+  for (const m of raw.matchAll(/\S+/g)) {
+    const start = m.index ?? 0;
+    tokens.push({ text: m[0], start, end: start + m[0].length });
+  }
+  const flags: [number, number][] = [];
   let branch: string | undefined;
   let base: string | undefined;
   let path: string | undefined;
@@ -166,22 +206,64 @@ function parseWorktreeArgs(raw: string): {
   let json = false;
   let yes = false;
   let help = false;
-  const words: string[] = [];
   for (let i = 0; i < tokens.length; i++) {
-    const t = tokens[i];
-    if (t === "--no-carry") carry = false;
-    else if (t === "--json") json = true;
-    else if (t === "--yes" || t === "-y") yes = true;
-    else if ((t === "--branch" || t === "-b") && tokens[i + 1]) branch = tokens[++i];
-    else if (t.startsWith("--branch=")) branch = t.slice("--branch=".length);
-    else if (t === "--base" && tokens[i + 1]) base = tokens[++i];
-    else if (t.startsWith("--base=")) base = t.slice("--base=".length);
-    else if (t === "--path" && tokens[i + 1]) path = tokens[++i];
-    else if (t.startsWith("--path=")) path = t.slice("--path=".length);
-    else if (t === "--help" || t === "-h") help = true;
-    else if (!t.startsWith("--")) words.push(t);
+    const t = tokens[i].text;
+    /** A flag and the value it ate, if any: both leave the task. */
+    const cut = (withValue: boolean) => {
+      flags.push([tokens[i].start, tokens[withValue && i + 1 < tokens.length ? i + 1 : i].end]);
+      if (withValue) i++;
+    };
+    if (t === "--no-carry") {
+      carry = false;
+      cut(false);
+    } else if (t === "--json") {
+      json = true;
+      cut(false);
+    } else if (t === "--yes" || t === "-y") {
+      yes = true;
+      cut(false);
+    } else if (t === "--help" || t === "-h") {
+      help = true;
+      cut(false);
+    } else if (t === "--branch" || t === "-b") {
+      const value = tokens[i + 1];
+      if (value) {
+        branch = value.text;
+        cut(true);
+      } else cut(false);
+    } else if (t.startsWith("--branch=")) {
+      branch = t.slice("--branch=".length);
+      cut(false);
+    } else if (t === "--base") {
+      const value = tokens[i + 1];
+      if (value) {
+        base = value.text;
+        cut(true);
+      } else cut(false);
+    } else if (t.startsWith("--base=")) {
+      base = t.slice("--base=".length);
+      cut(false);
+    } else if (t === "--path") {
+      const value = tokens[i + 1];
+      if (value) {
+        path = value.text;
+        cut(true);
+      } else cut(false);
+    } else if (t.startsWith("--path=")) {
+      path = t.slice("--path=".length);
+      cut(false);
+    } else if (t.startsWith("--")) {
+      cut(false); // a flag this grammar does not know
+    }
   }
-  return { branch, base, path, carry, json, yes, help, task: words.join(" ") };
+  let task = "";
+  let cursor = 0;
+  for (const [start, end] of flags) {
+    task += raw.slice(cursor, start);
+    cursor = end;
+  }
+  task += raw.slice(cursor);
+  return { branch, base, path, carry, json, yes, help, task: task.trim() };
 }
 
 /** `/land [target] [--strategy rebase|merge|squash]` — everything optional.
@@ -261,6 +343,14 @@ export default function (pi: ExtensionAPI) {
    *  agent run, and after create/land/abandon. Null = not bound. */
   let binding: (Binding & { standingInside: boolean; task?: string | null }) | null = null;
 
+  /** The approval gate for worktree-changing tool calls the agent started on its own. */
+  const gate = new Gate();
+  /**
+   * The question a window is drawing in the transcript, waiting for a click — with the call it is
+   * holding, so a yes can hand the model back exactly what it asked for.
+   */
+  let pendingAsk: { card: PendingAsk; toolName: string; params: Record<string, unknown> } | null = null;
+
   async function resolveBinding(exec: ExecFn, cwd: string, me: string | null | undefined): Promise<typeof binding> {
     const facts = await collectFacts(exec, cwd);
     if (!facts || !facts.commonDir) return (binding = null);
@@ -306,15 +396,28 @@ export default function (pi: ExtensionAPI) {
       const tui = ctx.mode === "tui";
       const exec = makeExec(pi, ctx.signal ?? undefined)(cwd);
       const facts = await collectFacts(exec, cwd);
+      // An open question rides along with whichever shape the chrome takes: it is the only thing a
+      // window must keep drawing when the session is not bound to anything yet.
+      const ask = pendingAsk ? { ask: pendingAsk.card } : {};
+      // The theme paints the terminal's line and status. A window paints its own chrome and its
+      // host may carry no terminal theme at all, so asking for one outside a terminal is both
+      // pointless and fatal: this used to throw before anything was published.
+      const paint = (color: ThemeColor, s: string): string => {
+        if (!tui) return s;
+        try {
+          return ctx.ui.theme.fg(color, s);
+        } catch {
+          return s;
+        }
+      };
       const clear = () => {
         if (tui) {
           ctx.ui.setWidget(WIDGET_KEY, undefined);
           ctx.ui.setStatus(STATUS_KEY, undefined);
         }
-        publishBinding(ctx, undefined);
+        publishBinding(ctx, pendingAsk ? ask : undefined);
       };
       if (!facts) return clear();
-      const th = ctx.ui.theme;
       const canon = await canonicalPath(facts.topLevel);
       const store = facts.commonDir ? await loadSyncedStore(exec, cwd, facts.commonDir) : null;
       const me = ctx.sessionManager.getSessionId();
@@ -329,13 +432,18 @@ export default function (pi: ExtensionAPI) {
         const ab = link.originBranch
           ? await aheadBehind(exec, link.worktreePath, link.originBranch, "HEAD")
           : { ahead: 0, behind: 0 };
+        // How much work the worktree holds, committed and uncommitted together — the number a
+        // person watching the chip expects to move.
+        const stat = link.originBranch
+          ? await worktreeStat(exec, link.worktreePath, link.originBranch)
+          : { files: 0, insertions: 0, deletions: 0 };
         const bits: string[] = [];
-        if (ab.ahead) bits.push(th.fg("success", `↑${ab.ahead}`));
-        if (ab.behind) bits.push(th.fg("warning", `↓${ab.behind}`));
-        if (dirty) bits.push(th.fg("warning", `${dirty} dirty`));
-        if (!ab.ahead && !dirty) bits.push(th.fg("dim", "nothing to land yet"));
-        const head = th.fg("accent", `🌲 ${link.branch} → ${dest}`);
-        const task = link.task ? th.fg("dim", ` · ${truncateMiddle(link.task, 36)}`) : "";
+        if (ab.ahead) bits.push(paint("success", `↑${ab.ahead}`));
+        if (ab.behind) bits.push(paint("warning", `↓${ab.behind}`));
+        if (dirty) bits.push(paint("warning", `${dirty} dirty`));
+        if (!ab.ahead && !dirty) bits.push(paint("dim", "nothing to land yet"));
+        const head = paint("accent", `🌲 ${link.branch} → ${dest}`);
+        const task = link.task ? paint("dim", ` · ${truncateMiddle(link.task, 36)}`) : "";
         publishBinding(ctx, {
           binding: {
             branch: link.branch,
@@ -343,15 +451,20 @@ export default function (pi: ExtensionAPI) {
             ahead: ab.ahead,
             behind: ab.behind,
             dirty,
+            files: stat.files,
+            added: stat.insertions,
+            deleted: stat.deletions,
             ...(link.task ? { task: link.task } : {}),
             worktreePath: link.worktreePath,
             originPath: link.originPath,
             inside: inside !== undefined,
           },
+          ...ask,
         });
         if (tui) {
-          ctx.ui.setWidget(WIDGET_KEY, [`${head}${task} · ${bits.join(" · ")}`]);
-          ctx.ui.setStatus(STATUS_KEY, th.fg("accent", `🌲 ${link.branch}`) + (ab.ahead ? th.fg("dim", ` ↑${ab.ahead}`) : ""));
+          const statBits = stat.files > 0 ? [`${stat.files} files`, `+${stat.insertions}`, `−${stat.deletions}`] : [];
+          ctx.ui.setWidget(WIDGET_KEY, [[head, task.trim(), ...bits, ...statBits].filter(Boolean).join(" · ")]);
+          ctx.ui.setStatus(STATUS_KEY, paint("accent", `🌲 ${link.branch}`) + (ab.ahead ? paint("dim", ` ↑${ab.ahead}`) : ""));
         }
         try { ctx.ui.setTitle(`🌲 ${link.branch}`); } catch { /* optional */ }
         return;
@@ -359,15 +472,27 @@ export default function (pi: ExtensionAPI) {
 
       const kids = store ? childrenOf(store, canon) : [];
       const visible = orderKidsForDisplay(visibleKidsFor(kids, me, canon), me);
-      if (visible.length === 0) return clear();
+      if (visible.length === 0) {
+        // No worktree of this session's own. A window gets the branch back — the chip PID stood
+        // down when this extension claimed the header — and nothing else; the terminal keeps the
+        // widget line it has always had.
+        if (!tui) {
+          publishBinding(ctx, { repo: { branch: facts.branch }, ...ask });
+          return;
+        }
+        const dirty = facts.porcelain.split("\n").filter(Boolean).length;
+        ctx.ui.setWidget(WIDGET_KEY, [`${paint("dim", `on ${facts.branch ?? "detached"}`)}${dirty ? paint("warning", ` · ${dirty} dirty`) : ""}`]);
+        ctx.ui.setStatus(STATUS_KEY, undefined);
+        return;
+      }
       const shown = visible.slice(0, 3).map((k) => k.branch).join(" · ");
       const more = visible.length > 3 ? ` +${visible.length - 3}` : "";
-      publishBinding(ctx, {
-        children: visible.map((k) => ({ branch: k.branch, worktreePath: k.worktreePath })),
-      });
+      if (!tui) {
+        publishBinding(ctx, { repo: { branch: facts.branch }, ...ask });
+      }
       if (tui) {
-        ctx.ui.setWidget(WIDGET_KEY, [`${th.fg("accent", `🌲 ${pluralWorktree(visible.length)}`)} ${th.fg("dim", `· ${shown}${more}`)}`]);
-        ctx.ui.setStatus(STATUS_KEY, th.fg("accent", `🌲 ${visible.length}`));
+        ctx.ui.setWidget(WIDGET_KEY, [`${paint("accent", `🌲 ${pluralWorktree(visible.length)}`)} ${paint("dim", `· ${shown}${more}`)}`]);
+        ctx.ui.setStatus(STATUS_KEY, paint("accent", `🌲 ${visible.length}`));
       }
     } catch {
       // Chrome must never break the session.
@@ -577,6 +702,209 @@ export default function (pi: ExtensionAPI) {
     if (d.dirty) bits.push(count("dirty file", d.dirty));
     const note = bits.length ? `${bits.join(" · ")} discarded` : "nothing discarded";
     return [`🗑️ ABANDON ${ink.hero(`【${d.branch}】`)}`, ...diagramTree([{ head: ink.dim(note) }], ink.dim)].join("\n");
+  }
+
+  /** The card palette, with the paint removed.
+   *
+   *  A dialog body is text the host draws, so the same tree reaches it as characters: theme
+   *  methods write ANSI unconditionally, and escapes in a window are literal noise. */
+  const plainInk: CardInk = {
+    hero: (s) => s,
+    dim: (s) => s,
+    error: (s) => s,
+    text: (s) => s,
+    fg: (_color, s) => s,
+  };
+
+  const GATE_TITLES: Record<GateKind, string> = {
+    create: "🌲 New worktree?",
+    land: "🌲 Land this worktree?",
+    abandon: "🌲 Abandon this worktree?",
+  };
+
+  /** The hero label each kind wears, in the terminal and in a window alike. */
+  const GATE_LABELS: Record<GateKind, string> = {
+    create: "🌲 WORKTREE",
+    land: "🌲 LAND",
+    abandon: "🗑️ ABANDON",
+  };
+
+  /**
+   * Whether a `target` names the worktree this session already holds — branch, path or its origin.
+   *
+   * Paths are compared canonically: `/land /Users/me/repo.worktrees/x` and `x` are the same
+   * worktree, and the card must not call the user's own tree a takeover.
+   */
+  async function namesSameWorktree(
+    b: NonNullable<Awaited<ReturnType<typeof resolveBinding>>>,
+    named: string,
+  ): Promise<boolean> {
+    if (named === b.branch || named === b.root || named === b.origin) return true;
+    if (!named.startsWith("/")) return false;
+    try {
+      return (await canonicalPath(named)) === (await canonicalPath(b.root));
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * What the user is being asked, gathered without doing any of it.
+   *
+   * The gate runs before the tool, so these numbers come from the same helpers the tool would use
+   * and never from its result. `null` means there is nothing worth asking — no repository, or no
+   * link to act on — and the tool's own error is the better answer.
+   */
+  async function askCard(
+    exec: ExecFn,
+    cwd: string,
+    kind: GateKind,
+    params: Record<string, unknown>,
+    me: string | null | undefined,
+  ): Promise<AskCard | null> {
+    try {
+      if (kind === "create") {
+        const facts = await collectFacts(exec, cwd);
+        if (!facts) return null;
+        // One worktree per session: a session that already owns one cannot open a second, and the
+        // tool says so with a hint pointing at the link it holds. A card offering to approve the
+        // impossible would be asking the user to authorize an error message.
+        if (await resolveBinding(exec, cwd, me)) return null;
+        const dirty = porcelainPaths(facts.porcelain);
+        const wanted = Array.isArray(params.carryPaths) ? params.carryPaths.map(String) : [];
+        const carried = params.carry === false ? [] : wanted.length > 0 ? wanted : dirty;
+        const changes = carried.length > 0 ? await workingChanges(exec, cwd, carried) : [];
+        const branch = typeof params.branch === "string" && params.branch ? params.branch : "a new branch";
+        const summary =
+          params.carry === false
+            ? dirty.length > 0
+              ? `carrying nothing · ${count("file", dirty.length)} stays in origin`
+              : "clean · nothing to carry"
+            : dirty.length === 0
+              ? "clean · nothing to carry"
+              : wanted.length > 0
+                ? `carrying ${carried.length} of ${dirty.length} files · ${dirty.length - carried.length} left in origin`
+                : `carrying ${count("file", carried.length)}`;
+        return {
+          kind,
+          hero: `${facts.branch ?? "?"} -> ${branch}`,
+          summary,
+          files: changes.map((c) => ({ status: c.status, path: c.path, added: c.added, deleted: c.deleted })),
+        };
+      }
+
+      // Which worktree is this about? The bare call is this session's own link. A named one is that
+      // name — and if the name is not the link this session holds, the tool is taking over somebody
+      // else's worktree, which is a different question with a different card. (A card built from the
+      // link it *does* hold would describe one worktree while the other one lands.)
+      const b = await resolveBinding(exec, cwd, me);
+      const named = typeof params.target === "string" && params.target.trim() ? params.target.trim() : "";
+      const own = named === "" || (b !== null && (await namesSameWorktree(b, named)));
+      if (!b || !own) {
+        // Nothing of this session's own to describe: a bare call has no card and the tool's own
+        // error is the better answer, while a takeover keeps one — the host cannot read that
+        // worktree's numbers, but it can state the one fact that matters about it.
+        if (!named) return null;
+        return { kind, hero: named, summary: "not this session's worktree — taken over deliberately" };
+      }
+
+      if (kind === "abandon") {
+        const wt = await collectFacts(exec, b.root);
+        const ab = b.originBranch ? await aheadBehind(exec, b.root, b.originBranch, "HEAD") : { ahead: 0, behind: 0 };
+        const dirty = wt ? wt.porcelain.split("\n").filter(Boolean).length : 0;
+        const bits: string[] = [];
+        if (ab.ahead) bits.push(count("commit", ab.ahead));
+        if (dirty) bits.push(count("dirty file", dirty));
+        // An empty worktree loses nothing: throwing it away is cleanup, and a card asking the user
+        // to approve a deletion that deletes nothing is noise between them and the work.
+        if (bits.length === 0) return null;
+        return { kind, hero: b.branch, summary: `${bits.join(" · ")} will be discarded` };
+      }
+
+      // Land: what the merge would carry, read before it carries it.
+      //
+      // Uncommitted work is part of that, and so is the origin's: the land checkpoints both sides
+      // before it merges. A card reading `nothing new · nothing to clean` beside a paragraph that
+      // just described two changed files is a card asking the user to approve nothing.
+      const base = b.originBranch ?? "origin";
+      const ab = await aheadBehind(exec, b.root, base, "HEAD");
+      const wt = await collectFacts(exec, b.root);
+      const wtFiles = wt ? wt.porcelain.split("\n").filter(Boolean) : [];
+      const pending = wtFiles.length;
+      // A file the worktree added and never committed is invisible to a diff against the base — git
+      // does not see untracked files that way — but the landing commits it, so the card must too.
+      const untracked = wtFiles.filter((l) => l.startsWith("?? ")).map((l) => l.slice(3).trim());
+      const origin = await collectFacts(exec, b.origin);
+      const originPending = origin ? porcelainPaths(origin.porcelain).length : 0;
+      // Nothing on either side: the landing is cleanup. The card would have to read `nothing new ·
+      // nothing to clean` and ask the user to approve it, and that is not a question.
+      if (ab.ahead === 0 && pending === 0 && originPending === 0) return null;
+      const [changes, added, subjects, prefs] = await Promise.all([
+        worktreeChanges(exec, b.root, base),
+        untracked.length > 0 ? workingChanges(exec, b.root, untracked) : Promise.resolve([]),
+        commitSubjects(exec, b.root, base, "HEAD"),
+        loadPrefs(),
+      ]);
+      const strategy = validStrategy(prefs.defaultStrategy) ? prefs.defaultStrategy : DEFAULT_STRATEGY;
+      // The land writes the pending work up as one checkpoint commit (task as its subject), so the
+      // card counts it: it is a commit the user is approving, not a detail of the machinery.
+      const checkpoint = pending > 0 ? 1 : 0;
+      const carrying = ab.ahead + checkpoint;
+      // The worktree has nothing of its own; the news is the origin's pending files, which the
+      // landing checkpoints before it merges. A head reading `0 commits` would be a card about
+      // nothing all over again, so this one carries the sentence instead of the count.
+      if (carrying === 0) {
+        return {
+          kind,
+          hero: `${b.branch} -> ${base}`,
+          note: `will ${strategy}`,
+          summary: `${count("file", originPending)} pending in ${base} — checkpointed first, then \`${b.branch}\` is cleaned up`,
+        };
+      }
+      return {
+        kind,
+        hero: `${b.branch} -> ${base}`,
+        note: `will ${strategy}`,
+        commitCount: carrying,
+        commits: [
+          ...subjects,
+          ...(checkpoint
+            ? [`${count("file", pending)} uncommitted — written up as one checkpoint commit`]
+            : []),
+          ...(originPending
+            ? [`${count("file", originPending)} pending in ${base} — checkpointed as \`wip(${base})\` first`]
+            : []),
+        ],
+        files: [...changes, ...added].map((c) => ({ status: c.status, path: c.path, added: c.added, deleted: c.deleted })),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * One card, painted for a terminal.
+   *
+   * Same rows the tool's own card uses, with the numbers read before anything happened. A card with
+   * a commit count heads its file list with the count; one without heads it with the summary — which
+   * is what the two cards looked like in the first place.
+   */
+  function paintAsk(c: AskCard, ink: CardInk, width: number): string {
+    const hero = `${GATE_LABELS[c.kind]} ${ink.hero(`【${c.hero}】`)}`;
+    const head = c.note ? `${hero} ${ink.dim(`· ${c.note}`)}` : hero;
+    const files = (c.files ?? []) as FileChange[];
+    const rows: DiagramRow[] = [];
+    if (c.commitCount !== undefined) {
+      rows.push({ head: treeHead(c.commitCount, "commit", ink), children: (c.commits ?? []).map((s) => wrapChild(ink.text(s), width)) });
+    }
+    if (files.length > 0) {
+      rows.push({ head: c.commitCount !== undefined ? treeHead(files.length, "file", ink) : ink.dim(c.summary ?? ""), children: fileLines(files, undefined, ink, width) });
+    } else if (rows.length === 0) {
+      rows.push({ head: ink.dim(c.summary ?? "") });
+    } else if (c.summary) {
+      rows.push({ head: ink.dim(c.summary) });
+    }
+    return [head, ...diagramTree(rows, ink.dim)].join("\n");
   }
 
 
@@ -1295,7 +1623,8 @@ export default function (pi: ExtensionAPI) {
       "Use worktree_create to isolate experimental, risky, or parallel work — never raw git worktree commands.",
       "Always pass an explicit `branch`: name it after the work, never a fixed or date-based format.",
       "When the workspace is dirty, triage first (worktree_status): carry only files related to the task via `carryPaths`; leave unrelated files untouched in the origin.",
-      "When work in the new worktree is finished, ask the user before landing instead of calling worktree_land silently (empty worktrees are the exception — just land to clean up).",
+      "Before you call it, say in one or two lines what you are isolating, on which branch, and what stays in the origin. The approval card carries the numbers; the words are yours to write.",
+      "When work in the new worktree is finished, call worktree_land to finish — the host asks the user to approve first, so never land silently and never ask in prose (empty worktrees are the exception — just land to clean up).",
     ],
     parameters: Type.Object({
       task: Type.Optional(Type.String({ description: "One line describing the work. Becomes the land commit subject." })),
@@ -1368,6 +1697,7 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Land a linked worktree back into its origin",
     promptGuidelines: [
       "Use worktree_land to finish work inside a linked worktree instead of raw git merge commands.",
+      "Before you call it, write the paragraph the user is about to approve: what changed, what you verified, and the conclusion. One short paragraph in plain words — the card shows the numbers, and no card can say what you decided or what you are unsure about.",
       "On conflict, resolve it yourself: read each conflicted file, keep the intended result from both sides, `git add`, then finish with finish:true. Explain the resolution in your own words; ask the user only when both sides look deliberately contradictory.",
       "Empty worktrees (no commits, clean) land as immediate cleanup with no confirmation needed — just call worktree_land.",
       "A bare land means YOUR tree: the tool resolves this session's own link (or the worktree you're standing in) and never auto-grabs another session's link. Name a branch/path explicitly only to deliberately take it over — then say who owned it and what you did.",
@@ -1518,16 +1848,19 @@ export default function (pi: ExtensionAPI) {
         }
         await bindSession(ctx, r.link);
 
-        const handoff = parsed.task
-          ? `User ran /worktree for: "${parsed.task}". This session is now bound to the worktree at ${r.path} — relative paths and bash already run there. Do the task; when done, ask the user before landing (never land silently).`
-          : `User ran /worktree with no task text. This session is now bound to the worktree at ${r.path}. Infer the pending task from the conversation and do it there; when done, ask the user before landing (never land silently).`;
-        const summary = [`Worktree ready: \`${r.branch}\` at ${r.path} — ${r.carryNote}.`, handoff].join("\n");
-        if (!ctx.hasUI) emit(ctx, summary, "info");
-        const trigger = Boolean(parsed.task) || hasHistory;
+        const owed = "When done, write the paragraph the user is owed — what changed, what you verified, what the conclusion is — then call worktree_land; the host puts the approval to the user (never land silently, never ask for approval in prose).";
+        const ready = `Worktree ready: \`${r.branch}\` at ${r.path} — ${r.carryNote}.`;
+        if (!ctx.hasUI) emit(ctx, ready, "info");
+        // The receipt first, then the user's own words. A prompt typed after `/worktree` is a
+        // prompt: sending it as a user message — rather than quoting it inside an extension note —
+        // is what keeps their transcript their own. A quoted string loses their formatting, turns
+        // their screenshot into a bare path, and leaves them with no message to read.
         pi.sendMessage(
           {
             customType: CARD_TYPE,
-            content: trigger ? summary : `Worktree ready: \`${r.branch}\` at ${r.path} — ${r.carryNote}. Session bound; waiting for the user's task.`,
+            content: parsed.task
+              ? ready
+              : `${ready}\nUser ran /worktree with no task text. This session is bound to ${r.path} — relative paths and bash already run there. Infer the pending task from the conversation and do it. ${owed}`,
             display: true,
             details: {
               kind: "create", from: r.from ?? facts.branch ?? "?", branch: r.branch,
@@ -1535,19 +1868,25 @@ export default function (pi: ExtensionAPI) {
               total: r.totalDirty, selective: r.selective, clean: r.clean,
             } satisfies CardDetails,
           },
-          { triggerTurn: trigger },
+          { triggerTurn: !parsed.task },
         );
-        if (!trigger && ctx.hasUI) ctx.ui.notify(`🌲 ${r.branch} ready — tell me what to do there.`, "info");
+        if (parsed.task) {
+          pi.sendUserMessage(parsed.task);
+        } else if (ctx.hasUI && !hasHistory) {
+          ctx.ui.notify(`🌲 ${r.branch} ready — tell me what to do there.`, "info");
+        }
         return;
       }
 
       // Model-driven isolation. The handoff stays invisible (display:false):
       // the transcript shows a single purple WORKTREE block once the model
       // creates it. Cards signal; the model speaks.
+      // Typing /worktree already answered the question the gate would ask.
+      gate.arm("create");
       const dirty = facts.porcelain.split("\n").filter(Boolean);
       const lines = [
         parsed.task
-          ? `User ran /worktree for: "${parsed.task}".`
+          ? "The user's request is the message above. Isolate that work into a new linked worktree."
           : "User ran /worktree with no task text — infer the pending task from the conversation and the dirty files below, then create the worktree and do it. Never come back with a question about what to work on: if nothing pending is inferable, still create it and say in one line that it's ready for whatever comes next.",
         `Origin: ${facts.branch ?? "?"} @ ${facts.topLevel}.`,
         "Isolate the work into a new linked worktree YOURSELF by calling worktree_create — never use raw git worktree commands. Don't ask the user anything — just open the worktree.",
@@ -1566,9 +1905,11 @@ export default function (pi: ExtensionAPI) {
         for (const f of dirty.slice(0, 30)) lines.push(`  ${f}`);
         if (dirty.length > 30) lines.push(`  … ${dirty.length - 30} more`);
       }
-      lines.push("Then continue the task inside the new worktree (tool calls are re-rooted there automatically). When done, ask the user before landing (never land silently).");
+      lines.push("Then continue the task inside the new worktree (tool calls are re-rooted there automatically). When done, write the paragraph the user is owed — what changed, what you verified, what the conclusion is — then call worktree_land; the host puts the approval to the user (never land silently, never ask for approval in prose).");
       const instruction = lines.join("\n");
       if (!ctx.hasUI) emit(ctx, instruction, "info");
+      // The how-to stays out of the transcript; the prompt the user typed goes in as their own
+      // message, so the bubble they wrote is the message the model answers.
       pi.sendMessage(
         {
           customType: CARD_TYPE,
@@ -1576,8 +1917,56 @@ export default function (pi: ExtensionAPI) {
           display: false,
           details: undefined,
         },
-        { triggerTurn: true },
+        { triggerTurn: !parsed.task },
       );
+      if (parsed.task) pi.sendUserMessage(parsed.task);
+    },
+  });
+
+  /** The tool each kind of question is about — what a yes hands back to the model. */
+  const GATE_TOOL: Record<GateKind, string> = {
+    create: "worktree_create",
+    land: "worktree_land",
+    abandon: "worktree_abandon",
+  };
+
+  /**
+   * The human's answer to a question the conversation is holding.
+   *
+   * A window's card calls this by name; a terminal user can type it. It never does the work itself
+   * — a yes arms the gate and hands the model back the call it already made, so the tool runs once,
+   * where it has always run, with the parameters it was called with. A no is recorded, so a retry
+   * in the same run is blocked without a second card.
+   */
+  pi.registerCommand("worktree-answer", {
+    description: "Answer the worktree question the agent is waiting on: /worktree-answer yes|no",
+    getArgumentCompletions: (prefix: string) =>
+      ["yes", "no"]
+        .filter((v) => v.startsWith(prefix.trim().toLowerCase()))
+        .map((value) => ({ value, label: value })),
+    handler: async (args: string, ctx: ExtensionCommandContext) => {
+      const open = pendingAsk;
+      if (!open || open.card.answer) {
+        emit(ctx, "Nothing is waiting for an answer.", "info");
+        return;
+      }
+      const kind = open.card.kind;
+      const yes = /^(y|yes|ok|approve|open|land|discard)/i.test(args.trim());
+      gate.answered(kind, yes);
+      // The card keeps its place, marked with the answer and stripped of its buttons. A question
+      // that vanishes under the pointer leaves the person who answered it with nothing to check,
+      // and the run it hands back to the model is where they watch what their answer did.
+      pendingAsk = { ...open, card: { ...open.card, answer: yes ? "yes" : "no" } };
+      await refreshChrome(ctx, ctx.cwd);
+
+      const what = kind === "create" ? "open a worktree" : kind === "land" ? "land the worktree" : "abandon the worktree";
+      const content = yes
+        ? [
+            `The user approved: ${what}.`,
+            `Lead with the paragraph they are owed — what changed, what you verified, what the conclusion is — then call \`${open.toolName}\` again with exactly these parameters: ${JSON.stringify(open.params).replace(/\{\}/, "{}")}. The approval is recorded, so it will run.`,
+          ].join(" ")
+        : `The user declined to ${what}. Do not retry; continue where the work already is and say in one line that you stayed.`;
+      pi.sendMessage({ customType: CARD_TYPE, content, display: false }, { triggerTurn: true });
     },
   });
 
@@ -1602,6 +1991,9 @@ export default function (pi: ExtensionAPI) {
         emit(ctx, `Unknown strategy \`${parsed.badStrategy}\` — want rebase, merge, or squash.`, "error");
         return;
       }
+      // The user asked to land: the gate has nothing left to ask about, including the
+      // finish:true call that concludes a conflict this command started.
+      gate.arm("land");
 
       // Zero popups by design: no strategy picker, no child picker, no
       // foreign-owner confirm. Blocks and ambiguity surface as purple cards.
@@ -1728,11 +2120,70 @@ export default function (pi: ExtensionAPI) {
 
   // Keep the readiness line (↑ commits, dirty count) honest after each run.
   pi.on("agent_end", async (_event, ctx) => {
+    // One answer per run. A question still on screen is not erased with it: the card stays until
+    // the user clicks, which is why `open` and the pending card outlive this. An answered card does
+    // end with the run it handed back — by then the receipt of what it asked for is in the
+    // transcript, and the turn folds like any other.
+    gate.reset();
+    if (pendingAsk?.card.answer) pendingAsk = null;
     await refreshChrome(ctx, ctx.cwd);
   });
 
-  // The virtual cwd: while bound, built-in tool calls run inside the worktree.
+  // Two jobs on the same hook, in this order: the approval gate, then the virtual cwd.
+  // The gate comes first because it is about whether the call happens at all.
   pi.on("tool_call", async (event, ctx) => {
+    const params = (event.input ?? {}) as Record<string, unknown>;
+    const kind = gateKind(event.toolName);
+    const verdict = gate.decide({
+      toolName: event.toolName,
+      hasUI: ctx.hasUI,
+      params,
+      saidToUser: saidToUser(ctx),
+    });
+    if (kind && verdict !== "allow") {
+      if (verdict === "explain") {
+        // No card, no answer held, and the turn goes on: the model writes the paragraph and asks
+        // again, and the question is put to the user under it.
+        return { block: true, reason: explainFirstReason(kind) };
+      }
+      if (verdict === "deny") {
+        const open = gate.openKind();
+        return {
+          block: true,
+          reason: open && open !== kind ? waitingOnOtherReason(open, kind) : deniedReason(kind),
+        };
+      }
+      try {
+        const exec = getExec(ctx.cwd, ctx.signal ?? undefined);
+        // A card is the question. No card means there is nothing to put in front of the user — no
+        // repository, no link, or a worktree with nothing in it — and the tool's own answer is the
+        // better one: blocking there would end the run with a question nobody can see or answer.
+        const card = await askCard(exec, ctx.cwd, kind, params, ctx.sessionManager.getSessionId());
+        if (!card) return;
+        if (ctx.mode === "tui") {
+          // A terminal has nowhere of its own to put a card, so the question is a dialog — painted
+          // with the same rows a window composes from the same card.
+          const ok = await ctx.ui.confirm(GATE_TITLES[kind], paintAsk(card, plainInk, 60));
+          gate.answered(kind, ok);
+          if (!ok) return { block: true, reason: deniedReason(kind) };
+        } else {
+          // A window draws the question where the call itself is: the call stops here, the row in
+          // the transcript becomes the card with its buttons, and the answer comes back as
+          // /worktree-answer. Nothing is asked twice — a retry while the card is still open is
+          // blocked without a second card.
+          gate.asked(kind);
+          pendingAsk = { card: { ...card, id: event.toolCallId }, toolName: event.toolName, params };
+          await refreshChrome(ctx, ctx.cwd);
+          ctx.ui.notify(`${GATE_TITLES[kind]} Waiting in the conversation.`, "info");
+          return { block: true, reason: awaitingReason(kind), terminate: true };
+        }
+      } catch {
+        // A question that cannot be asked must not swallow the call: what fails to be *drawn* is not
+        // a reason to hold the work, and the tool is about to answer for itself anyway.
+        gate.answered(kind, true);
+      }
+    }
+
     if (!binding || binding.standingInside) return;
     try {
       const r = rewriteToolInput(event.toolName, event.input as Record<string, unknown>, binding, ctx.cwd);
