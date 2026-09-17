@@ -549,6 +549,17 @@ export async function diffStat(exec: ExecFn, cwd: string, base: string, head: st
   return parseShortstat(r.code === 0 ? r.stdout : "");
 }
 
+/**
+ * Everything a working tree has that `base` does not — committed and uncommitted together.
+ *
+ * Two-dot on purpose: a session's chip should say how much work exists in the worktree, including
+ * the parts not saved to a commit yet, which is the number that changes while you watch.
+ */
+export async function worktreeStat(exec: ExecFn, cwd: string, base: string): Promise<DiffStat> {
+  const r = await run(exec, ["diff", "--shortstat", base], cwd);
+  return parseShortstat(r.code === 0 ? r.stdout : "");
+}
+
 /** File paths mentioned in status porcelain (`XY <path>`), renames resolved. */
 export function porcelainPaths(porcelain: string): string[] {
   return porcelain.split("\n").filter(Boolean)
@@ -580,10 +591,23 @@ const countOf = (s: string | undefined): number | null => (s !== undefined && /^
 /** Per-file change rows for `head` vs `base` — status letter plus line counts
  *  (same three-dot range as diffStat/diffNames). */
 export async function diffChanges(exec: ExecFn, cwd: string, base: string, head: string): Promise<FileChange[]> {
-  const range = `${base}...${head}`;
+  return changedRows(exec, cwd, [`${base}...${head}`]);
+}
+
+/**
+ * Per-file change rows for a working tree against `base` — committed and uncommitted together, the
+ * same two-dot range `worktreeStat` counts. This is what a landing carries, so it is what a card
+ * about landing has to show: a worktree whose work is still in the working tree is the ordinary
+ * case, and a file list built from `base...HEAD` alone would call it nothing.
+ */
+export async function worktreeChanges(exec: ExecFn, cwd: string, base: string): Promise<FileChange[]> {
+  return changedRows(exec, cwd, [base]);
+}
+
+async function changedRows(exec: ExecFn, cwd: string, range: string[]): Promise<FileChange[]> {
   const [name, num] = await Promise.all([
-    run(exec, ["diff", "--name-status", range], cwd),
-    run(exec, ["diff", "--numstat", range], cwd),
+    run(exec, ["diff", "--name-status", ...range], cwd),
+    run(exec, ["diff", "--numstat", ...range], cwd),
   ]);
   if (name.code !== 0) return [];
   const counts = num.code === 0 ? num.stdout.split("\n").filter(Boolean) : [];
